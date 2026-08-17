@@ -1,15 +1,22 @@
-# DPVO 实时单目 SLAM：摄像头实时定位与重建
+# DPVO 实时单目 SLAM：手机/摄像头实时定位与重建
 
-基于 **DPVO**（Deep Patch Visual Odometry，Princeton VL，NeurIPS 2023）的实时单目 SLAM 项目。读取笔记本/USB 摄像头视频流，**实时估计相机位姿（定位）+ 构建稀疏 3D 点云（重建）+ 实时绘制相机轨迹**。
+基于 **DPVO**（Deep Patch Visual Odometry，Princeton VL，NeurIPS 2023）的实时单目 SLAM 项目。**手机（或笔记本摄像头）实时推流 → 电脑实时估计相机位姿（定位）+ 构建稀疏 3D 点云（重建）+ 双窗口实时显示**。
 
 > DPVO 论文：*Deep Patch Visual Odometry*, Teed, Lipson, Deng, NeurIPS 2023
 > 官方仓库：https://github.com/princeton-vl/DPVO
 
 ## 效果
 
-- 移动摄像头（或移动电脑），终端实时打印相机位置 `(x, y, z)`
-- OpenCV 窗口左侧显示摄像头画面，右侧实时绘制相机运动轨迹（2D 俯视投影）
-- 退出时自动保存轨迹图 `trajectory_plots/live.pdf` 和轨迹文件
+运行后弹出**两个窗口**：
+
+| 窗口 | 内容 |
+|---|---|
+| **Live Camera** | 手机/摄像头实时视频画面 |
+| **3D Map & Trajectory** | 实时 3D 点云重建（按深度着色：近红远蓝）+ 相机轨迹（黄色线 + 当前位置红点） |
+
+终端实时打印相机位置 `(x, y, z)`；退出时自动保存轨迹图 `trajectory_plots/live.pdf`。
+
+**算力要求**：RTX 3060 6GB 实测流畅运行（显存占用稳定 ~0.2GB，CPU 解码手机流约 10% 单核）。手机端负责编码，电脑只解码 + SLAM，负载很低，**不会卡死**。唯一感知到的"延迟"是 WiFi 网络延迟（50-200ms），属正常现象。
 
 ## 目录结构
 
@@ -18,13 +25,13 @@ dpvo_real_time/
 ├── README.md               # 本说明
 ├── environment.yml         # conda 环境定义（python3.10 + torch2.3.1 + cuda12.1）
 ├── dpvo.pth                # DPVO 预训练权重（14MB）
-├── cam_server.py           # 【Windows 侧】摄像头推流脚本
-├── dpvo_live.py            # 【WSL 侧】实时 SLAM 脚本（定位 + 轨迹显示）
-├── dpvo/                   # DPVO 核心 Python 包（已编译好 CUDA 扩展则直接可用）
+├── cam_server.py           # 【Windows 侧】笔记本摄像头推流脚本（TCP 模式用）
+├── dpvo_live.py            # 【WSL 侧】实时 SLAM 脚本（定位 + 双窗口显示）
+├── dpvo/                   # DPVO 核心 Python 包
 ├── config/                 # DPVO 配置（default.yaml）
 ├── calib/                  # 相机内参文件（fx fy cx cy）
 ├── thirdparty/             # eigen（编译 CUDA 扩展时需要）
-├── DPViewer/               # 3D 可视化模块（可选，见"3D 可视化"节）
+├── DPViewer/               # Pangolin 3D 可视化（可选，见"3D 可视化"节）
 └── demo.py                 # 离线 demo（跑 TUM 数据集）
 ```
 
@@ -32,11 +39,11 @@ dpvo_real_time/
 
 | 组件 | 要求 | 说明 |
 |---|---|---|
-| Windows | 10/11 + WSL2 | 摄像头在 Windows 侧读取 |
+| Windows | 10/11 + WSL2 | 手机推流时无需 Windows 侧运行任何程序 |
 | WSL2 发行版 | Ubuntu 22.04 | 跑 SLAM 主程序（GPU 加速） |
-| GPU | NVIDIA，≥6GB 显存 | 需要 CUDA 驱动 |
+| GPU | NVIDIA，≥6GB 显存 | 实测 6GB 稳定运行（显存仅用 ~0.2GB） |
 | WSL 内 Python | conda 环境 `dpvo` | 见下方搭建步骤 |
-| Windows 侧 Python | 3.10 + opencv-python | 只需读摄像头 + 推流 |
+| 手机 | Android / iPhone + 推流 App | 见"手机推流"节 |
 
 ## 环境搭建（一次性）
 
@@ -84,16 +91,34 @@ pip install gdown
 gdown 1dRqftpImtHbbIPNBIseCv9EvrlHEnjhX -O models.zip && unzip models.zip   # 得到 dpvo.pth
 ```
 
-### 5. Windows 侧 Python（只需 opencv）
+## 运行一：手机推流（推荐，无需 Windows 侧程序）
 
-```powershell
-# 已有 Python 3.10 的话：
-pip install opencv-python
+**手机装推流 App**（都支持 HTTP MJPEG 流，免费）：
+
+| 手机 | App | 操作 |
+|---|---|---|
+| Android | **IP Webcam**（Google Play 免费） | 打开后底部显示 `http://192.168.x.x:8080`，点 `Start server` |
+| iPhone | **DroidCam** 或 **Camo**（免费版） | 打开后记下界面上的 `http://192.168.x.x:4747/video` |
+
+**前提**：手机和电脑连**同一个 WiFi**。
+
+**WSL 终端**（只需要这一个终端）：
+
+```bash
+cd /mnt/c/Users/luyicheng/Desktop/暑期研0培训/7.28-8.13/cv_learning/slam_learning/dpvo_real_time
+conda activate dpvo
+python -u dpvo_live.py --source http://<手机IP>:8080/video
+# 例：python -u dpvo_live.py --source http://192.168.1.5:8080/video
 ```
 
-## 运行：摄像头实时定位（核心功能）
+看到 `[OK] 已连接，开始实时 SLAM` 后：
+1. 弹出两个窗口：**Live Camera**（手机画面）+ **3D Map & Trajectory**（实时重建）
+2. **拿着手机慢慢平移/转动**——终端实时打印位置，3D 点云和轨迹实时生长
+3. 按 `q` 退出，轨迹自动保存到 `trajectory_plots/live.pdf`
 
-需要**两个终端**同时运行（Windows 一个，WSL 一个）。
+> 无需手动改代码：WSL2 镜像网络下 WSL 可直接访问手机 IP（局域网直连，不走代理）。
+
+## 运行二：笔记本摄像头（Windows + WSL 双终端）
 
 ### 终端 1（Windows PowerShell）—— 摄像头推流
 
@@ -110,35 +135,27 @@ python "C:\Users\luyicheng\Desktop\暑期研0培训\7.28-8.13\cv_learning\slam_l
 ```bash
 cd /mnt/c/Users/luyicheng/Desktop/暑期研0培训/7.28-8.13/cv_learning/slam_learning/dpvo_real_time
 conda activate dpvo
-python -u dpvo_live.py
+python -u dpvo_live.py        # 默认 tcp://127.0.0.1:8765 连 Windows 推流
 ```
 
-看到 `[OK] 已连接，开始实时 SLAM` 后：
-
-1. 弹出一个窗口：**左 = 摄像头画面，右 = 相机轨迹**
-2. **移动摄像头 / 拿笔记本转一圈**——终端实时打印位置，右侧轨迹实时生长
-3. 按 `q` 退出，轨迹自动保存到 `trajectory_plots/live.pdf`
-
-### 关键注意
-
-- **位姿一直 (0,0,0) 是正常的**：单目 SLAM 必须靠相机运动产生视差，摄像头静止时轨迹就是原点。**动起来才有轨迹**。
-- 移动时要**平缓**，避免剧烈晃动导致初始化失败；初始化约需前几秒。
-- 摄像头内参用的是近似值（fx=fy=360 @ 384x288），轨迹**形状正确但尺度不精确**。追求精度可做相机标定后更新 `dpvo_live.py` 里的 `FX, FY, CX, CY`。
-
-## 运行：离线 demo（TUM 数据集，不需要摄像头）
+## 运行三：离线测试（图像序列循环，不需要手机/摄像头）
 
 ```bash
-# 下载 TUM fr1_desk（329MB）
+# 用 TUM fr1_desk 数据（329MB，一次性下载）
 curl -sL -A "Mozilla/5.0" -o fr1_desk.tgz \
   "https://cvg.cit.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_desk.tgz"
 tar -xzf fr1_desk.tgz
 
-# 跑离线 demo（输出轨迹图 + 点云 + 轨迹文件）
-python demo.py --imagedir=rgbd_dataset_freiburg1_desk/rgb \
-  --calib=calib/fr1.txt --stride=2 --plot --save_ply --save_trajectory --name=fr1_desk
+# 循环播放图像序列，模拟实时流（双窗口效果完全一致）
+python -u dpvo_live.py --source imagefolder:///home/<user>/DPVO/datasets/rgbd_dataset_freiburg1_desk/rgb
 ```
 
-输出：`trajectory_plots/fr1_desk.pdf`（轨迹图）、`fr1_desk.ply`（点云）、`saved_trajectories/fr1_desk.txt`（TUM 格式轨迹）。
+## 关键注意
+
+- **位姿一直 (0,0,0) 是正常的**：单目 SLAM 必须靠相机运动产生视差，摄像头静止时轨迹就是原点。**动起来才有轨迹**。
+- 移动时要**平缓**，避免剧烈晃动导致初始化失败；初始化约需前几秒。
+- 手机画面建议 640×480 或 720p（App 里可调），推太高分辨率浪费流量且无增益（处理端统一降为 384×288）。
+- 内参用的是近似值（fx=fy=360 @ 384x288），轨迹**形状正确但尺度不精确**。追求精度可做相机标定后更新 `dpvo_live.py` 里的 `FX, FY, CX, CY`。
 
 ## 常见问题
 
@@ -147,22 +164,23 @@ python demo.py --imagedir=rgbd_dataset_freiburg1_desk/rgb \
 | 编译报 `nv/target` / `thrust/complex.h` 找不到 | cccl 版本问题，按环境搭建第 2 步降级 |
 | `pip install .` 报 `No module named 'torch'` | 加 `--no-build-isolation` |
 | 摄像头打开失败（Code 45） | 打开笔记本摄像头开关（Fn 快捷键/物理挡板/BIOS） |
-| 跑一会儿 CUDA OOM | 6GB 显存限制，已默认降到 384×288 处理分辨率；显存更大的机器可调高 |
-| 位姿全是 0 | 摄像头静止，移动摄像头 |
-| 3D 可视化（viz）报错/崩溃 | 见下方说明 |
+| 手机流连不上 | 确认同一 WiFi；WSL 里 `curl -s http://<手机IP>:8080/video | head -c 100` 测试；Windows 防火墙需允许入站 8080（IP Webcam 首次会提示） |
+| 跑一会儿 CUDA OOM | **已根治**（推理包在 `torch.no_grad()` 内，显存稳定 ~0.2GB）。若仍出现，检查是否有其他 GPU 程序占用 |
+| 位姿全是 0 | 摄像头静止，移动手机/摄像头 |
+| 3D 可视化（DPViewer/viz）报错 | 见下方说明；内置 OpenCV 3D 视图不依赖它 |
 
-## 3D 可视化（可选，默认关闭）
+## 内置 3D 视图 vs DPViewer
 
-本项目默认用 OpenCV 窗口显示 **2D 轨迹**（稳定可靠）。仓库含 `DPViewer/`（Pangolin 3D 可视化模块），如需 3D 点云 + 轨迹窗口，把 `dpvo_live.py` 里的 `viz=False` 改为 `viz=True`，并满足：
-
-- 在**本机直接使用**（不要通过远程桌面/Todesk，WSLg 图形转发会异常）
-- 先编译旧 ABI 版 Pangolin（`~/DPVO/Pangolin`，DPVO 官方 fork，`-D_GLIBCXX_USE_CXX11_ABI=0`）
-- 运行时设置 `export LD_LIBRARY_PATH=<pangolin_install>/lib:$LD_LIBRARY_PATH`
-
-> 注意：Pangolin 窗口在 WSLg 远程会话下无法工作（连最小示例都会段错误），这是环境限制而非代码问题。
+- **内置 3D 视图**（默认）：`dpvo_live.py` 自带的 OpenCV 3D 点云投影窗口，零额外依赖，WSLg 远程会话下也稳定。深度按颜色区分（近红远蓝），叠加黄色轨迹线。
+- **DPViewer**（可选）：仓库含 Pangolin 3D 可视化模块（`DPViewer/`），交互更强（可旋转视角），但：
+  - 需编译旧 ABI 版 Pangolin（DPVO 官方 fork，`-D_GLIBCXX_USE_CXX11_ABI=0`）到独立目录
+  - **Pangolin 窗口在 WSLg 远程会话（Todesk 等）下无法工作**（连最小示例都段错误），本机直接使用才行
+  - 运行时设置 `export LD_LIBRARY_PATH=<pangolin_install>/lib:$LD_LIBRARY_PATH`
 
 ## 参考
 
 - DPVO 官方仓库：https://github.com/princeton-vl/DPVO
 - DPVO 论文：https://arxiv.org/abs/2208.04726
 - TUM RGB-D 数据集：https://cvg.cit.tum.de/data/datasets/rgbd-dataset
+- IP Webcam（Android）：https://play.google.com/store/apps/details?id=com.pas.webcam
+- DroidCam（iPhone/Android）：https://dev47apps.com/
