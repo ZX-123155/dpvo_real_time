@@ -21,3 +21,6 @@ saved_trajectories/
 thirdparty/eigen-3.4.0/
 DPViewer/build/
 Pangolin/
+
+# 调试截图
+live_*.png
