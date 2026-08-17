@@ -5,14 +5,17 @@
   窗口 1 "Live Camera"      : 手机实时视频（原始画面）
   窗口 2 "3D Map & Trajectory" : 实时 3D 点云重建（按深度着色）+ 相机轨迹
 
-视频源两种模式（--source）：
+视频源模式（--source）：
   tcp://127.0.0.1:8765                     默认：连 Windows 侧 cam_server.py
   http://<手机IP>:8080/video               手机 App 推流（IP Webcam / DroidCam 等，
                                            WSL 镜像网络直连，无需 Windows 中转）
+  video://<路径>.mp4                       本地视频文件（离线测试）
+  imagefolder://<目录>                     图像序列（循环播放，离线测试）
 
 用法（WSL 内 dpvo 环境）：
   python dpvo_live.py                                        # TCP 模式
   python dpvo_live.py --source http://192.168.1.5:8080/video # 手机直连
+  python dpvo_live.py --source video://a.mp4 --calib=calib/phone.txt  # 视频文件
 
 按 q 或 Ctrl+C 退出，退出时保存轨迹图到 trajectory_plots/live.pdf
 """
@@ -29,8 +32,7 @@ import torch
 from dpvo.config import cfg
 from dpvo.dpvo import DPVO
 
-W, H = 384, 288                # DPVO 处理分辨率（6GB 显存下的稳定配置）
-FX, FY, CX, CY = 360.0, 360.0, 192.0, 144.0   # 近似内参（对应 640x480 源）
+TARGET_LONG = 640             # 处理长边（保持宽高比缩放，DPVO 对低分辨率/变形敏感）
 VIEW_W, VIEW_H = 640, 480      # 3D 视图画布尺寸
 VF = 500.0                     # 3D 视图虚拟焦距（控制视角缩放）
 VRAM_LIMIT = 4.2e9             # 显存保护阈值（4.2GB，6GB 卡留余量）
@@ -103,6 +105,23 @@ class HTTPSource(threading.Thread):
 
     def close(self):
         self.running = False
+        self.cap.release()
+
+
+class VideoFileSource:
+    """本地视频文件（离线测试用）"""
+
+    def __init__(self, path):
+        self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            raise RuntimeError("无法打开视频: {}".format(path))
+        print("[OK] 视频文件 {} 已打开".format(path))
+
+    def get_frame(self):
+        ret, frame = self.cap.read()
+        return frame if ret else None
+
+    def close(self):
         self.cap.release()
 
 
@@ -198,15 +217,30 @@ def draw_3d_view(points, colors, pose, traj_w):
 def parse_args():
     p = argparse.ArgumentParser(description="DPVO 实时 SLAM：手机/摄像头流 → 实时定位 + 3D 重建")
     p.add_argument("--source", default="tcp://127.0.0.1:8765",
-                   help="视频源：tcp://host:port（Windows cam_server）、http://手机IP:端口/video（手机 App 直连）或 imagefolder://目录（图像序列循环，离线测试）")
+                   help="视频源：tcp://host:port、http://手机IP:端口/video、video://路径 或 imagefolder://目录")
+    p.add_argument("--calib", default=None,
+                   help="内参文件（fx fy cx cy，对应原始分辨率）。默认按 640x480 横屏估 fx=fy=600 cx=320 cy=240")
     p.add_argument("--screenshot", type=int, default=0, metavar="N",
                    help="调试用：在第 N 帧保存双窗口截图到当前目录（live_camera.png / live_3d.png）")
     return p.parse_args()
 
 
+def load_calib(path):
+    """读内参文件（fx fy cx cy），返回对应原始分辨率的 K"""
+    c = np.loadtxt(path, delimiter=" ")[:4]
+    return float(c[0]), float(c[1]), float(c[2]), float(c[3])
+
+
 def main():
     args = parse_args()
     cfg.merge_from_file("config/default.yaml")
+
+    # 原始内参（对应输入流原始分辨率）；可通过 --calib 覆盖
+    if args.calib:
+        FX0, FY0, CX0, CY0 = load_calib(args.calib)
+    else:
+        FX0, FY0, CX0, CY0 = 600.0, 600.0, 320.0, 240.0   # 640x480 横屏近似
+    print("[INFO] 原始内参: fx={:.0f} fy={:.0f} cx={:.0f} cy={:.0f}".format(FX0, FY0, CX0, CY0))
 
     if args.source.startswith("tcp://"):
         host, port = args.source[6:].rsplit(":", 1)
@@ -215,10 +249,12 @@ def main():
         print("[INFO] 连接手机视频流 {} ...".format(args.source))
         src = HTTPSource(args.source)
         print("[OK] 已连接，开始实时 SLAM（按 q 退出）")
+    elif args.source.startswith("video://"):
+        src = VideoFileSource(args.source[len("video://"):])
     elif args.source.startswith("imagefolder://"):
         src = FolderSource(args.source[len("imagefolder://"):])
     else:
-        raise SystemExit("不支持的 --source: {}（用 tcp://、http:// 或 imagefolder://）".format(args.source))
+        raise SystemExit("不支持的 --source: {}（用 tcp://、http://、video:// 或 imagefolder://）".format(args.source))
 
     slam = None
     traj = []          # 世界系轨迹（保留全程，用于 3D 视图）
@@ -234,16 +270,28 @@ def main():
                     time.sleep(0.005)
                     continue
 
-                frame = cv2.resize(frame, (W, H))
+                # 保持宽高比缩放到长边 TARGET_LONG，16 对齐。
+                # 不能强制压成固定尺寸：DPVO 对变形/过低分辨率非常敏感，
+                # 384x288 下位姿完全出不来（实测全零）
+                h, w = frame.shape[:2]
+                scale = TARGET_LONG / max(h, w)
+                nw, nh = int(w * scale) // 16 * 16, int(h * scale) // 16 * 16
+                frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+                H, W = frame.shape[:2]
+                # 内参按缩放比例同步：fx_new = fx_orig * W / w（缩放后/原始）
+                fx, fy, cx, cy = FX0 * W / w, FY0 * H / h, CX0 * W / w, CY0 * H / h
+
                 image = torch.from_numpy(frame).permute(2, 0, 1).cuda()
-                intrinsics = torch.as_tensor([FX, FY, CX, CY]).cuda()
+                intrinsics = torch.as_tensor([fx, fy, cx, cy]).cuda()
 
                 if slam is None:
                     slam = DPVO(cfg, "dpvo.pth", ht=H, wd=W, viz=False)
 
                 slam(t, image, intrinsics)
 
-                pose = slam.pg.poses_[-1].detach().cpu().numpy()
+                # 注意：poses_ 是预分配缓冲区，poses_[-1] 是"最后一个槽位"（未使用，恒为 0）！
+                # 当前最新帧是 poses_[slam.n - 1]（上一帧是 slam.n - 2）
+                pose = slam.pg.poses_[slam.n - 1].detach().cpu().numpy()
                 traj.append(pose[:3])
 
                 # ---- 显存保护（兜底保险，no_grad 后一般不会触发） ----

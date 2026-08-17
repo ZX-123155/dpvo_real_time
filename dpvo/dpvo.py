@@ -439,7 +439,9 @@ class DPVO:
 
         self.counter += 1        
         if self.n > 0 and not self.is_initialized:
-            if self.motion_probe() < 2.0:
+            # 初始化运动阈值：原版 2.0px（对低帧率/小幅度手机移动太苛刻，
+            # 实测手机缓慢移动时 motion_probe 仅 ~1.3px），放宽到 0.5px
+            if self.motion_probe() < 0.5:
                 self.pg.delta[self.counter - 1] = (self.counter - 2, Id[0])
                 return
 
