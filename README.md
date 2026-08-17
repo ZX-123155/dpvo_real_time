@@ -71,7 +71,11 @@ export TORCH_CUDA_ARCH_LIST="8.6"   # 3060 = sm_86；40 系改 8.9，50 系改 1
 pip install --no-build-isolation .  # 必须加 --no-build-isolation（torch 是 conda 装的）
 ```
 
-> 编译需要 `thirdparty/eigen-3.4.0`（本仓库已含）。若缺失：`wget https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip && unzip -d thirdparty`。
+> 编译需要 `thirdparty/eigen-3.4.0`。若缺失（GitHub 仓库未包含），手动下载：
+> ```bash
+> cd dpvo_real_time && mkdir -p thirdparty && cd thirdparty
+> wget https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip && unzip eigen-3.4.0.zip
+> ```
 
 ### 4. 下载权重（若 dpvo.pth 缺失）
 
