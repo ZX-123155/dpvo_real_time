@@ -220,6 +220,8 @@ def parse_args():
                    help="视频源：tcp://host:port、http://手机IP:端口/video、video://路径 或 imagefolder://目录")
     p.add_argument("--calib", default=None,
                    help="内参文件（fx fy cx cy，对应原始分辨率）。默认按 640x480 横屏估 fx=fy=600 cx=320 cy=240")
+    p.add_argument("--no-gui", action="store_true",
+                   help="不弹窗口（远程/无显示环境下用），只打印位姿，退出时仍保存轨迹")
     p.add_argument("--screenshot", type=int, default=0, metavar="N",
                    help="调试用：在第 N 帧保存双窗口截图到当前目录（live_camera.png / live_3d.png）")
     return p.parse_args()
@@ -234,6 +236,9 @@ def load_calib(path):
 def main():
     args = parse_args()
     cfg.merge_from_file("config/default.yaml")
+    no_gui = args.no_gui
+    if no_gui:
+        print("[INFO] --no-gui 模式：不显示窗口，仅打印位姿")
 
     # 原始内参（对应输入流原始分辨率）；可通过 --calib 覆盖
     if args.calib:
@@ -307,27 +312,31 @@ def main():
                     print("[t={:4d}] pos=({:6.3f}, {:6.3f}, {:6.3f})".format(
                         t, pose[0], pose[1], pose[2]))
 
-                # ---- 双窗口显示 ----
-                cv2.imshow("Live Camera", frame)
+                # ---- 双窗口显示（--no-gui 或远程环境下自动降级为不显示） ----
+                if not no_gui:
+                    # 每 5 帧取一次点云（GPU→CPU 拷贝有开销，控制频率）
+                    if t % 5 == 0 and slam is not None:
+                        pts = slam.pg.points_.detach().cpu().numpy()
+                        cols = slam.pg.colors_.detach().cpu().numpy()
+                    else:
+                        pts = cols = None
+                    view3d = draw_3d_view(pts, cols, pose, traj)
+                    try:
+                        cv2.imshow("Live Camera", frame)
+                        cv2.imshow("3D Map & Trajectory", view3d)
+                    except cv2.error:
+                        print("[WARN] 窗口显示失败（远程/无显示环境？），自动切换到 --no-gui 模式")
+                        no_gui = True
 
-                # 每 5 帧取一次点云（GPU→CPU 拷贝有开销，控制频率）
-                if t % 5 == 0 and slam is not None:
-                    pts = slam.pg.points_.detach().cpu().numpy()
-                    cols = slam.pg.colors_.detach().cpu().numpy()
-                else:
-                    pts = cols = None
-                view3d = draw_3d_view(pts, cols, pose, traj)
-                cv2.imshow("3D Map & Trajectory", view3d)
+                    # 调试截图
+                    if args.screenshot > 0 and t == args.screenshot:
+                        cv2.imwrite("live_camera.png", frame)
+                        cv2.imwrite("live_3d.png", view3d)
+                        print("[INFO] 截图已保存: live_camera.png / live_3d.png")
 
-                # 调试截图
-                if args.screenshot > 0 and t == args.screenshot:
-                    cv2.imwrite("live_camera.png", frame)
-                    cv2.imwrite("live_3d.png", view3d)
-                    print("[INFO] 截图已保存: live_camera.png / live_3d.png")
-
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("[INFO] 用户按 q 退出")
-                    break
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        print("[INFO] 用户按 q 退出")
+                        break
                 t += 1
     except KeyboardInterrupt:
         print("[INFO] 中断")
