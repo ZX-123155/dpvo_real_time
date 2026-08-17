@@ -1,0 +1,23 @@
+# 大数据 / 数据集（按需自行下载）
+datasets/
+*.tgz
+*.zip
+*.bag
+*.MOV
+
+# 构建产物
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# 运行输出
+trajectory_plots/
+saved_trajectories/
+*.ply
+*.pth.bak
+
+# 编译相关
+thirdparty/eigen-3.4.0/
+DPViewer/build/
+Pangolin/
